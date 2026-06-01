@@ -32,6 +32,14 @@ const server = createServer(async (req, res) => {
     if (req.method === "OPTIONS") return sendJson(res, 204, {});
     const url = new URL(req.url, `http://${req.headers.host}`);
 
+    if (req.method === "GET" && url.pathname === "/") {
+      return sendHtml(res, 200, landingPage());
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin") {
+      return sendHtml(res, 200, adminPage());
+    }
+
     if (req.method === "GET" && url.pathname === "/health") {
       return sendJson(res, 200, { ok: true, service: "seenlife-api", time: new Date().toISOString() });
     }
@@ -323,6 +331,14 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+function sendHtml(res, statusCode, html) {
+  res.writeHead(statusCode, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  res.end(html);
+}
+
 function sendError(res, error) {
   const status = error.statusCode || 500;
   sendJson(res, status, {
@@ -419,4 +435,255 @@ function httpError(message, statusCode, code) {
   error.statusCode = statusCode;
   if (code) error.code = code;
   return error;
+}
+
+function landingPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seenlife API</title>
+  <style>
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7f9;color:#111827}
+    main{max-width:760px;margin:12vh auto;padding:0 24px}
+    h1{font-size:40px;line-height:1.1;margin:0 0 14px}
+    p{font-size:17px;line-height:1.6;color:#4b5563}
+    a{color:#0f766e;text-decoration:none;font-weight:700}
+    .box{background:white;border:1px solid #e5e7eb;border-radius:8px;padding:24px;box-shadow:0 12px 30px rgba(15,23,42,.06)}
+    code{background:#eef2f7;border-radius:6px;padding:3px 6px}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="box">
+      <h1>Seenlife API is running</h1>
+      <p>This is the API backend for Seenlife model access, balances, API keys, and DeepSeek routing.</p>
+      <p>Health check: <a href="/health">/health</a></p>
+      <p>Admin panel: <a href="/admin">/admin</a></p>
+      <p>OpenAI-compatible endpoint: <code>/v1/chat/completions</code></p>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+function adminPage() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seenlife Admin</title>
+  <style>
+    :root{color-scheme:light;--bg:#f5f7fb;--panel:#fff;--line:#dfe5ee;--text:#101828;--muted:#667085;--accent:#0f766e;--bad:#b42318}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    header{height:64px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;background:#111827;color:white}
+    header h1{font-size:18px;margin:0;font-weight:700}
+    header span{font-size:13px;color:#cbd5e1}
+    main{max-width:1180px;margin:0 auto;padding:26px}
+    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px}
+    .panel h2{font-size:16px;margin:0 0 14px}
+    label{display:block;font-size:12px;font-weight:700;color:#475467;margin:12px 0 6px}
+    input,select,textarea{width:100%;height:40px;border:1px solid #cfd6e2;border-radius:7px;padding:0 11px;font:inherit;background:white}
+    textarea{height:94px;padding:10px;resize:vertical}
+    button{height:38px;border:0;border-radius:7px;background:var(--accent);color:white;font-weight:700;padding:0 14px;cursor:pointer}
+    button.secondary{background:#344054}
+    button.ghost{background:#eef2f6;color:#1f2937}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .row{display:flex;gap:10px;align-items:end}
+    .row>*{flex:1}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+    .status{margin:14px 0 0;font-size:13px;color:var(--muted);min-height:20px}
+    .error{color:var(--bad)}
+    .ok{color:var(--accent)}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{text-align:left;border-bottom:1px solid #eef2f6;padding:10px 8px;vertical-align:top}
+    th{color:#475467;font-size:12px}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;background:#f1f5f9;border-radius:6px;padding:2px 5px}
+    .secret{word-break:break-all;background:#ecfdf3;border:1px solid #abefc6;border-radius:8px;padding:10px;margin-top:10px}
+    .stack{display:grid;gap:18px}
+    @media(max-width:860px){.grid{grid-template-columns:1fr}.row{display:block}.row>*{margin-bottom:10px}main{padding:16px}}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Seenlife Admin</h1>
+    <span>Balance, API keys, and usage</span>
+  </header>
+  <main>
+    <div class="grid">
+      <section class="stack">
+        <div class="panel">
+          <h2>Admin Login</h2>
+          <label for="token">Admin token</label>
+          <input id="token" type="password" autocomplete="current-password" placeholder="Paste SEENLIFE_ADMIN_TOKEN">
+          <div class="actions">
+            <button onclick="saveToken()">Save token</button>
+            <button class="ghost" onclick="clearToken()">Clear</button>
+            <button class="secondary" onclick="refreshAll()">Refresh data</button>
+          </div>
+          <div id="loginStatus" class="status"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Create Customer</h2>
+          <div class="row">
+            <div>
+              <label for="userEmail">Email</label>
+              <input id="userEmail" placeholder="customer@example.com">
+            </div>
+            <div>
+              <label for="userName">Name</label>
+              <input id="userName" placeholder="Customer name">
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="createUser()">Create or find user</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Add Balance</h2>
+          <div class="row">
+            <div>
+              <label for="topupEmail">Email</label>
+              <input id="topupEmail" placeholder="customer@example.com">
+            </div>
+            <div>
+              <label for="topupAmount">Amount USD</label>
+              <select id="topupAmount">
+                <option value="10">$10</option>
+                <option value="50">$50</option>
+                <option value="100">$100</option>
+              </select>
+            </div>
+            <div>
+              <label for="orderId">Order ID</label>
+              <input id="orderId" placeholder="Shopify order">
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="topup()">Add balance</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Create Seenlife API Key</h2>
+          <div class="row">
+            <div>
+              <label for="keyEmail">Email</label>
+              <input id="keyEmail" placeholder="customer@example.com">
+            </div>
+            <div>
+              <label for="keyName">Key name</label>
+              <input id="keyName" value="Main key">
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="createApiKey()">Generate API key</button>
+          </div>
+          <div id="newKey"></div>
+        </div>
+      </section>
+
+      <section class="stack">
+        <div class="panel">
+          <h2>Users</h2>
+          <div id="users"></div>
+        </div>
+        <div class="panel">
+          <h2>Recent Usage</h2>
+          <div id="usage"></div>
+        </div>
+      </section>
+    </div>
+    <div id="status" class="status"></div>
+  </main>
+  <script>
+    const tokenInput = document.getElementById('token');
+    tokenInput.value = localStorage.getItem('seenlifeAdminToken') || '';
+    function token(){ return tokenInput.value.trim(); }
+    function setStatus(message, bad){
+      const el = document.getElementById('status');
+      el.textContent = message || '';
+      el.className = 'status ' + (bad ? 'error' : 'ok');
+    }
+    function saveToken(){
+      localStorage.setItem('seenlifeAdminToken', token());
+      document.getElementById('loginStatus').textContent = 'Token saved in this browser.';
+      refreshAll();
+    }
+    function clearToken(){
+      localStorage.removeItem('seenlifeAdminToken');
+      tokenInput.value = '';
+      document.getElementById('loginStatus').textContent = 'Token cleared.';
+    }
+    async function api(path, options){
+      const res = await fetch(path, Object.assign({
+        headers: {
+          'content-type': 'application/json',
+          'authorization': 'Bearer ' + token()
+        }
+      }, options || {}));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.error && data.error.message) || 'Request failed');
+      return data;
+    }
+    async function createUser(){
+      try {
+        const email = document.getElementById('userEmail').value;
+        const name = document.getElementById('userName').value;
+        await api('/admin/users', { method:'POST', body: JSON.stringify({ email, name }) });
+        copyCommonEmails(email);
+        setStatus('Customer is ready.');
+        refreshAll();
+      } catch (error) { setStatus(error.message, true); }
+    }
+    async function topup(){
+      try {
+        const email = document.getElementById('topupEmail').value;
+        const amountUsd = Number(document.getElementById('topupAmount').value);
+        const orderId = document.getElementById('orderId').value;
+        await api('/admin/topups', { method:'POST', body: JSON.stringify({ email, amountUsd, orderId }) });
+        setStatus('Balance added.');
+        refreshAll();
+      } catch (error) { setStatus(error.message, true); }
+    }
+    async function createApiKey(){
+      try {
+        const email = document.getElementById('keyEmail').value;
+        const name = document.getElementById('keyName').value;
+        const data = await api('/admin/api-keys', { method:'POST', body: JSON.stringify({ email, name }) });
+        document.getElementById('newKey').innerHTML = '<div class="secret"><strong>Copy this key now:</strong><br><code>' + escapeHtml(data.apiKey.key) + '</code></div>';
+        setStatus('API key generated. Copy it now; it will not be shown again.');
+        refreshAll();
+      } catch (error) { setStatus(error.message, true); }
+    }
+    async function refreshAll(){
+      if (!token()) return;
+      await Promise.allSettled([loadUsers(), loadUsage()]);
+    }
+    async function loadUsers(){
+      const data = await api('/admin/users');
+      const users = data.users || [];
+      document.getElementById('users').innerHTML = users.length ? '<table><thead><tr><th>Email</th><th>Name</th><th>Balance</th></tr></thead><tbody>' + users.map(user => '<tr><td>' + escapeHtml(user.email) + '</td><td>' + escapeHtml(user.name || '') + '</td><td>$' + Number(user.balanceUsd).toFixed(6) + '</td></tr>').join('') + '</tbody></table>' : '<p class="status">No users yet.</p>';
+    }
+    async function loadUsage(){
+      const data = await api('/admin/usage');
+      const logs = data.usageLogs || [];
+      document.getElementById('usage').innerHTML = logs.length ? '<table><thead><tr><th>Model</th><th>Tokens</th><th>Charged</th><th>Time</th></tr></thead><tbody>' + logs.slice(0,25).map(log => '<tr><td>' + escapeHtml(log.model) + '</td><td>' + Number(log.totalTokens || 0) + '</td><td>$' + (Number(log.chargedMicroUsd || 0) / 1000000).toFixed(6) + '</td><td>' + escapeHtml(log.createdAt || '') + '</td></tr>').join('') + '</tbody></table>' : '<p class="status">No usage yet.</p>';
+    }
+    function copyCommonEmails(email){
+      ['topupEmail','keyEmail'].forEach(id => { if (!document.getElementById(id).value) document.getElementById(id).value = email; });
+    }
+    function escapeHtml(value){
+      return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
+    }
+    refreshAll();
+  </script>
+</body>
+</html>`;
 }
