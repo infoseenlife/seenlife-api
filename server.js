@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -25,6 +25,7 @@ const MODELS = {
   }
 };
 
+const SHOPIFY_CREDIT_PRODUCT_RE = /seenlife\s+api\s+(balance|credits?)/i;
 const EMPTY_DB = { users: [], apiKeys: [], ledger: [], usageLogs: [] };
 
 const server = createServer(async (req, res) => {
@@ -73,6 +74,10 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
       return handleChat(req, res);
+    }
+
+    if (req.method === "POST" && url.pathname === "/webhooks/shopify/orders-paid") {
+      return handleShopifyOrderPaid(req, res);
     }
 
     if (url.pathname.startsWith("/admin/")) {
@@ -157,6 +162,94 @@ async function handleChat(req, res) {
       usage_log_id: result.usageLog.id
     }
   });
+}
+
+async function handleShopifyOrderPaid(req, res) {
+  const rawBody = await readRawBody(req);
+  verifyShopifyWebhook(req, rawBody);
+
+  let order;
+  try {
+    order = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw httpError("Shopify webhook body must be valid JSON", 400);
+  }
+
+  const topup = parseShopifyTopup(order);
+  if (topup.amountMicroUsd <= 0) {
+    return sendJson(res, 200, { ok: true, ignored: true, reason: "No Seenlife API balance product found" });
+  }
+
+  const result = await processShopifyTopup(topup);
+  await sendTopupEmail(result);
+
+  return sendJson(res, 200, {
+    ok: true,
+    duplicate: result.duplicate,
+    email: result.user.email,
+    amountUsd: Number(formatUsd(topup.amountMicroUsd)),
+    balanceUsd: result.user.balanceUsd,
+    apiKeyGenerated: Boolean(result.plainApiKey)
+  });
+}
+
+async function processShopifyTopup(topup) {
+  let plainApiKey = "";
+
+  const result = await withDb(async (db) => {
+    let user = findUserByEmail(db, topup.email);
+    if (!user) {
+      user = createUserRecord({ email: topup.email, name: topup.name });
+      db.users.push(user);
+    } else if (!user.name && topup.name) {
+      user.name = topup.name;
+    }
+
+    const duplicate = db.ledger.some((txn) => txn.type === "topup" && txn.referenceId === topup.orderReference);
+    const existingApiKey = db.apiKeys.find((key) => key.userId === user.id && !key.revokedAt);
+
+    if (!existingApiKey) {
+      plainApiKey = createApiKey();
+      db.apiKeys.push({
+        id: `key_${randomUUID()}`,
+        userId: user.id,
+        name: "Main key",
+        keyHash: hashApiKey(plainApiKey),
+        createdAt: nowIso(),
+        lastUsedAt: null,
+        revokedAt: null
+      });
+    }
+
+    if (!duplicate) {
+      user.balanceMicroUsd += topup.amountMicroUsd;
+      user.updatedAt = nowIso();
+      db.ledger.push({
+        id: `txn_${randomUUID()}`,
+        userId: user.id,
+        type: "topup",
+        amountMicroUsd: topup.amountMicroUsd,
+        balanceAfterMicroUsd: user.balanceMicroUsd,
+        referenceId: topup.orderReference,
+        note: `Shopify order ${topup.orderName}`,
+        createdAt: nowIso()
+      });
+    }
+
+    return {
+      duplicate,
+      user: publicUser(user),
+      orderName: topup.orderName,
+      plainApiKey,
+      hasExistingApiKey: Boolean(existingApiKey)
+    };
+  });
+
+  return {
+    ...result,
+    topupAmountUsd: formatUsd(topup.amountMicroUsd),
+    lineItems: topup.lineItems
+  };
 }
 
 async function handleAdmin(req, res, url) {
@@ -271,6 +364,151 @@ async function callDeepSeek(upstreamModel, body) {
   return data;
 }
 
+function verifyShopifyWebhook(req, rawBody) {
+  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+  if (!secret) throw httpError("SHOPIFY_WEBHOOK_SECRET is not configured", 500);
+
+  const received = String(req.headers["x-shopify-hmac-sha256"] || "");
+  if (!received) throw httpError("Missing Shopify webhook signature", 401);
+
+  const expected = createHmac("sha256", secret).update(rawBody).digest("base64");
+  const receivedBuffer = Buffer.from(received, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  if (receivedBuffer.length !== expectedBuffer.length || !timingSafeEqual(receivedBuffer, expectedBuffer)) {
+    throw httpError("Invalid Shopify webhook signature", 401);
+  }
+}
+
+function parseShopifyTopup(order) {
+  const email = normalizeEmail(order.email || order.contact_email || order.customer?.email);
+  if (!email) throw httpError("Shopify order does not include a customer email", 400);
+
+  const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
+  let amountMicroUsd = 0;
+  const matchedItems = [];
+
+  for (const item of lineItems) {
+    const title = String(item.title || item.name || "");
+    const sku = String(item.sku || "");
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    const price = Number(item.price || item.pre_tax_price || 0);
+    const isSeenlifeCredit = SHOPIFY_CREDIT_PRODUCT_RE.test(title) || SHOPIFY_CREDIT_PRODUCT_RE.test(sku);
+    if (!isSeenlifeCredit || price <= 0) continue;
+
+    amountMicroUsd += usdToMicro(price * quantity);
+    matchedItems.push({ title, sku, quantity, price });
+  }
+
+  return {
+    email,
+    name: customerName(order),
+    amountMicroUsd,
+    orderName: String(order.name || order.order_number || order.id || "Shopify order"),
+    orderReference: `shopify:${order.id || order.admin_graphql_api_id || order.name || randomUUID()}`,
+    lineItems: matchedItems
+  };
+}
+
+function customerName(order) {
+  const direct = order.customer
+    ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim()
+    : "";
+  return direct || String(order.billing_address?.name || order.shipping_address?.name || "").trim();
+}
+
+async function sendTopupEmail(result) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("RESEND_API_KEY is not configured; skipping top-up email.");
+    return;
+  }
+
+  const from = process.env.SEENLIFE_EMAIL_FROM || "Seenlife <support@seenlife.us>";
+  const dashboardUrl = process.env.SEENLIFE_DASHBOARD_URL || "https://seenlife.us/pages/account-dashboard";
+  const docsUrl = process.env.SEENLIFE_DOCS_URL || "https://seenlife.us/pages/api-docs";
+  const apiUrl = process.env.SEENLIFE_API_URL || "https://seenlife-api-production.up.railway.app/v1/chat/completions";
+  const subject = result.duplicate
+    ? `Seenlife order ${result.orderName} was already processed`
+    : "Your Seenlife API credits are ready";
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "authorization": `Bearer ${apiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      from,
+      to: [result.user.email],
+      subject,
+      text: topupEmailText(result, { dashboardUrl, docsUrl, apiUrl }),
+      html: topupEmailHtml(result, { dashboardUrl, docsUrl, apiUrl })
+    })
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    console.error("Resend email failed:", text);
+    throw httpError("Top-up succeeded, but email delivery failed", 502, "email_failed");
+  }
+}
+
+function topupEmailText(result, urls) {
+  const apiKeyBlock = result.plainApiKey
+    ? `Your Seenlife API Key:\n${result.plainApiKey}\n`
+    : "Your existing Seenlife API Key is still active. For security, we do not resend existing keys by email.\n";
+
+  return `Hi ${result.user.name || result.user.email},
+
+Your Seenlife API balance has been updated.
+
+Recharge amount: $${Number(result.topupAmountUsd).toFixed(2)}
+Current balance: $${Number(result.user.balanceUsd).toFixed(6)}
+Shopify order: ${result.orderName}
+
+${apiKeyBlock}
+API endpoint:
+${urls.apiUrl}
+
+Manage your balance and API access:
+${urls.dashboardUrl}
+
+API docs:
+${urls.docsUrl}
+
+Thank you,
+Seenlife`;
+}
+
+function topupEmailHtml(result, urls) {
+  const apiKeyBlock = result.plainApiKey
+    ? `<p style="margin:16px 0 6px;font-weight:700">Your Seenlife API Key</p><div style="padding:12px;border:1px solid #abefc6;background:#ecfdf3;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all">${escapeHtml(result.plainApiKey)}</div>`
+    : `<p>Your existing Seenlife API Key is still active. For security, we do not resend existing keys by email.</p>`;
+
+  return `<!doctype html>
+<html>
+<body style="margin:0;background:#f6f7f9;font-family:Inter,Arial,sans-serif;color:#111827">
+  <div style="max-width:620px;margin:0 auto;padding:28px">
+    <div style="background:white;border:1px solid #e5e7eb;border-radius:10px;padding:24px">
+      <h1 style="font-size:22px;margin:0 0 16px">Your Seenlife API credits are ready</h1>
+      <p>Hi ${escapeHtml(result.user.name || result.user.email)},</p>
+      <p>Your Seenlife API balance has been updated.</p>
+      <table style="width:100%;border-collapse:collapse;margin:18px 0">
+        <tr><td style="padding:8px 0;color:#667085">Recharge amount</td><td style="padding:8px 0;text-align:right;font-weight:700">$${Number(result.topupAmountUsd).toFixed(2)}</td></tr>
+        <tr><td style="padding:8px 0;color:#667085">Current balance</td><td style="padding:8px 0;text-align:right;font-weight:700">$${Number(result.user.balanceUsd).toFixed(6)}</td></tr>
+        <tr><td style="padding:8px 0;color:#667085">Shopify order</td><td style="padding:8px 0;text-align:right;font-weight:700">${escapeHtml(result.orderName)}</td></tr>
+      </table>
+      ${apiKeyBlock}
+      <p style="margin-top:22px">API endpoint:<br><a href="${escapeHtml(urls.apiUrl)}">${escapeHtml(urls.apiUrl)}</a></p>
+      <p><a href="${escapeHtml(urls.dashboardUrl)}" style="display:inline-block;background:#0f766e;color:white;text-decoration:none;padding:11px 16px;border-radius:7px;font-weight:700">Open Seenlife dashboard</a></p>
+      <p>API docs: <a href="${escapeHtml(urls.docsUrl)}">${escapeHtml(urls.docsUrl)}</a></p>
+      <p style="color:#667085;margin-top:24px">Thank you,<br>Seenlife</p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 async function authenticate(req) {
   const token = bearerToken(req);
   if (!token) throw httpError("Missing Bearer API key", 401);
@@ -319,6 +557,12 @@ async function readJson(req) {
   } catch {
     throw httpError("Request body must be valid JSON", 400);
   }
+}
+
+async function readRawBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks);
 }
 
 function sendJson(res, statusCode, payload) {
@@ -424,6 +668,16 @@ function createApiKey() {
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
+}
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[ch]));
 }
 
 function nowIso() {
