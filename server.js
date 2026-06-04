@@ -15,8 +15,8 @@ const MODELS = {
     provider: "deepseek",
     upstreamProvider: "tokenmix",
     upstreamModel: "deepseek/deepseek-v4-flash",
-    inputUsdPerMillion: 0.210219,
-    outputUsdPerMillion: 0.420438,
+    inputUsdPerMillion: 0.16,
+    outputUsdPerMillion: 0.32,
     upstreamInputUsdPerMillion: 0.131387,
     upstreamOutputUsdPerMillion: 0.262774
   },
@@ -25,8 +25,8 @@ const MODELS = {
     provider: "deepseek",
     upstreamProvider: "tokenmix",
     upstreamModel: "deepseek/deepseek-v4-pro",
-    inputUsdPerMillion: 2.207299,
-    outputUsdPerMillion: 4.414599,
+    inputUsdPerMillion: 1.89,
+    outputUsdPerMillion: 3.79,
     upstreamInputUsdPerMillion: 1.576642,
     upstreamOutputUsdPerMillion: 3.153285
   },
@@ -35,8 +35,8 @@ const MODELS = {
     provider: "openai",
     upstreamProvider: "tokenmix",
     upstreamModel: "openai/gpt-4o",
-    inputUsdPerMillion: 3.27375,
-    outputUsdPerMillion: 13.095,
+    inputUsdPerMillion: 2.75,
+    outputUsdPerMillion: 10.99,
     upstreamInputUsdPerMillion: 2.425,
     upstreamOutputUsdPerMillion: 9.7
   },
@@ -45,8 +45,8 @@ const MODELS = {
     provider: "openai",
     upstreamProvider: "tokenmix",
     upstreamModel: "openai/gpt-5-mini",
-    inputUsdPerMillion: 0.36375,
-    outputUsdPerMillion: 2.91,
+    inputUsdPerMillion: 0.29,
+    outputUsdPerMillion: 2.29,
     upstreamInputUsdPerMillion: 0.2425,
     upstreamOutputUsdPerMillion: 1.94
   },
@@ -55,8 +55,8 @@ const MODELS = {
     provider: "anthropic",
     upstreamProvider: "tokenmix",
     upstreamModel: "anthropic/claude-sonnet-4.6",
-    inputUsdPerMillion: 3.9,
-    outputUsdPerMillion: 19.5,
+    inputUsdPerMillion: 3.29,
+    outputUsdPerMillion: 16.49,
     upstreamInputUsdPerMillion: 3,
     upstreamOutputUsdPerMillion: 15
   },
@@ -65,8 +65,8 @@ const MODELS = {
     provider: "google",
     upstreamProvider: "tokenmix",
     upstreamModel: "google/gemini-3.1-flash-lite",
-    inputUsdPerMillion: 0.36375,
-    outputUsdPerMillion: 2.1825,
+    inputUsdPerMillion: 0.29,
+    outputUsdPerMillion: 1.75,
     upstreamInputUsdPerMillion: 0.2425,
     upstreamOutputUsdPerMillion: 1.455
   },
@@ -75,8 +75,8 @@ const MODELS = {
     provider: "qwen",
     upstreamProvider: "tokenmix",
     upstreamModel: "qwen/qwen3.6-max-preview",
-    inputUsdPerMillion: 1.655474,
-    outputUsdPerMillion: 9.932847,
+    inputUsdPerMillion: 1.39,
+    outputUsdPerMillion: 8.49,
     upstreamInputUsdPerMillion: 1.182482,
     upstreamOutputUsdPerMillion: 7.094891
   },
@@ -85,8 +85,8 @@ const MODELS = {
     provider: "moonshot",
     upstreamProvider: "tokenmix",
     upstreamModel: "moonshot/kimi-k2.6",
-    inputUsdPerMillion: 1.19562,
-    outputUsdPerMillion: 4.966423,
+    inputUsdPerMillion: 0.99,
+    outputUsdPerMillion: 4.29,
     upstreamInputUsdPerMillion: 0.854015,
     upstreamOutputUsdPerMillion: 3.547445
   }
