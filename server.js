@@ -6,22 +6,89 @@ import { dirname, resolve } from "node:path";
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const DB_PATH = resolve(process.env.SEENLIFE_DB_PATH || "./data/seenlife-db.json");
-const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
+const TOKENMIX_URL = process.env.TOKENMIX_BASE_URL || "https://api.tokenmix.ai/v1/chat/completions";
+const OPENROUTER_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1/chat/completions";
 
 const MODELS = {
   "deepseek/deepseek-v4-flash": {
     id: "deepseek/deepseek-v4-flash",
     provider: "deepseek",
-    upstreamModel: "deepseek-v4-flash",
-    inputUsdPerMillion: 0.25,
-    outputUsdPerMillion: 0.5
+    upstreamProvider: "tokenmix",
+    upstreamModel: "deepseek/deepseek-v4-flash",
+    inputUsdPerMillion: 0.210219,
+    outputUsdPerMillion: 0.420438,
+    upstreamInputUsdPerMillion: 0.131387,
+    upstreamOutputUsdPerMillion: 0.262774
   },
   "deepseek/deepseek-v4-pro": {
     id: "deepseek/deepseek-v4-pro",
     provider: "deepseek",
-    upstreamModel: "deepseek-v4-pro",
-    inputUsdPerMillion: 1.576642,
-    outputUsdPerMillion: 3.153285
+    upstreamProvider: "tokenmix",
+    upstreamModel: "deepseek/deepseek-v4-pro",
+    inputUsdPerMillion: 2.207299,
+    outputUsdPerMillion: 4.414599,
+    upstreamInputUsdPerMillion: 1.576642,
+    upstreamOutputUsdPerMillion: 3.153285
+  },
+  "openai/gpt-4o": {
+    id: "openai/gpt-4o",
+    provider: "openai",
+    upstreamProvider: "tokenmix",
+    upstreamModel: "openai/gpt-4o",
+    inputUsdPerMillion: 3.27375,
+    outputUsdPerMillion: 13.095,
+    upstreamInputUsdPerMillion: 2.425,
+    upstreamOutputUsdPerMillion: 9.7
+  },
+  "openai/gpt-5-mini": {
+    id: "openai/gpt-5-mini",
+    provider: "openai",
+    upstreamProvider: "tokenmix",
+    upstreamModel: "openai/gpt-5-mini",
+    inputUsdPerMillion: 0.36375,
+    outputUsdPerMillion: 2.91,
+    upstreamInputUsdPerMillion: 0.2425,
+    upstreamOutputUsdPerMillion: 1.94
+  },
+  "anthropic/claude-sonnet-4.6": {
+    id: "anthropic/claude-sonnet-4.6",
+    provider: "anthropic",
+    upstreamProvider: "tokenmix",
+    upstreamModel: "anthropic/claude-sonnet-4.6",
+    inputUsdPerMillion: 3.9,
+    outputUsdPerMillion: 19.5,
+    upstreamInputUsdPerMillion: 3,
+    upstreamOutputUsdPerMillion: 15
+  },
+  "google/gemini-3.1-flash-lite": {
+    id: "google/gemini-3.1-flash-lite",
+    provider: "google",
+    upstreamProvider: "tokenmix",
+    upstreamModel: "google/gemini-3.1-flash-lite",
+    inputUsdPerMillion: 0.36375,
+    outputUsdPerMillion: 2.1825,
+    upstreamInputUsdPerMillion: 0.2425,
+    upstreamOutputUsdPerMillion: 1.455
+  },
+  "qwen/qwen3.6-max-preview": {
+    id: "qwen/qwen3.6-max-preview",
+    provider: "qwen",
+    upstreamProvider: "tokenmix",
+    upstreamModel: "qwen/qwen3.6-max-preview",
+    inputUsdPerMillion: 1.655474,
+    outputUsdPerMillion: 9.932847,
+    upstreamInputUsdPerMillion: 1.182482,
+    upstreamOutputUsdPerMillion: 7.094891
+  },
+  "moonshot/kimi-k2.6": {
+    id: "moonshot/kimi-k2.6",
+    provider: "moonshot",
+    upstreamProvider: "tokenmix",
+    upstreamModel: "moonshot/kimi-k2.6",
+    inputUsdPerMillion: 1.19562,
+    outputUsdPerMillion: 4.966423,
+    upstreamInputUsdPerMillion: 0.854015,
+    upstreamOutputUsdPerMillion: 3.547445
   }
 };
 
@@ -108,7 +175,7 @@ async function handleChat(req, res) {
   if (auth.user.balanceMicroUsd < 1) throw httpError("Insufficient balance", 402, "insufficient_balance");
 
   const startedAt = Date.now();
-  const upstream = await callDeepSeek(model.upstreamModel, body);
+  const upstream = await callModelGateway(model, body);
   const cost = calculateUsageCost(model, upstream.usage || {});
 
   const result = await withDb(async (db) => {
@@ -130,11 +197,14 @@ async function handleChat(req, res) {
       apiKeyId: apiKey.id,
       model: model.id,
       provider: model.provider,
+      upstreamProvider: upstream.seenlifeUpstreamProvider || model.upstreamProvider,
       upstreamModel: model.upstreamModel,
       inputTokens: cost.inputTokens,
       outputTokens: cost.outputTokens,
       totalTokens: cost.totalTokens,
+      upstreamCostMicroUsd: cost.upstreamMicroUsd,
       chargedMicroUsd: cost.totalMicroUsd,
+      grossProfitMicroUsd: cost.grossProfitMicroUsd,
       latencyMs: Date.now() - startedAt,
       createdAt: nowIso()
     };
@@ -336,17 +406,47 @@ async function handleAdmin(req, res, url) {
   return sendJson(res, 404, { error: { message: "Route not found", type: "not_found" } });
 }
 
-async function callDeepSeek(upstreamModel, body) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) throw httpError("DEEPSEEK_API_KEY is not configured", 500);
+async function callModelGateway(model, body) {
+  try {
+    const data = await callOpenAiCompatibleGateway({
+      url: TOKENMIX_URL,
+      apiKey: process.env.TOKENMIX_API_KEY,
+      apiKeyName: "TOKENMIX_API_KEY",
+      modelName: model.upstreamModel,
+      body
+    });
+    data.seenlifeUpstreamProvider = "tokenmix";
+    return data;
+  } catch (error) {
+    if (!process.env.OPENROUTER_API_KEY) throw error;
+    console.warn(`TokenMix request failed for ${model.id}; trying OpenRouter fallback:`, error.message);
+    const data = await callOpenAiCompatibleGateway({
+      url: OPENROUTER_URL,
+      apiKey: process.env.OPENROUTER_API_KEY,
+      apiKeyName: "OPENROUTER_API_KEY",
+      modelName: model.upstreamModel,
+      body,
+      extraHeaders: {
+        "http-referer": process.env.SEENLIFE_SITE_URL || "https://seenlife.us",
+        "x-title": "Seenlife API"
+      }
+    });
+    data.seenlifeUpstreamProvider = "openrouter";
+    return data;
+  }
+}
 
-  const response = await fetch(DEEPSEEK_URL, {
+async function callOpenAiCompatibleGateway({ url, apiKey, apiKeyName, modelName, body, extraHeaders = {} }) {
+  if (!apiKey) throw httpError(`${apiKeyName} is not configured`, 500);
+
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`
+      authorization: `Bearer ${apiKey}`,
+      ...extraHeaders
     },
-    body: JSON.stringify({ ...body, model: upstreamModel, stream: false })
+    body: JSON.stringify({ ...body, model: modelName, stream: false })
   });
 
   const text = await response.text();
@@ -358,7 +458,7 @@ async function callDeepSeek(upstreamModel, body) {
   }
 
   if (!response.ok) {
-    throw httpError(data?.error?.message || "DeepSeek upstream request failed", response.status);
+    throw httpError(data?.error?.message || "Upstream model gateway request failed", response.status);
   }
 
   return data;
@@ -642,11 +742,17 @@ function calculateUsageCost(model, usage) {
   const totalTokens = Number(usage.total_tokens || inputTokens + outputTokens);
   const inputMicroUsd = Math.ceil((inputTokens * model.inputUsdPerMillion * 1_000_000) / 1_000_000);
   const outputMicroUsd = Math.ceil((outputTokens * model.outputUsdPerMillion * 1_000_000) / 1_000_000);
+  const upstreamInputMicroUsd = Math.ceil((inputTokens * model.upstreamInputUsdPerMillion * 1_000_000) / 1_000_000);
+  const upstreamOutputMicroUsd = Math.ceil((outputTokens * model.upstreamOutputUsdPerMillion * 1_000_000) / 1_000_000);
+  const totalMicroUsd = inputMicroUsd + outputMicroUsd;
+  const upstreamMicroUsd = upstreamInputMicroUsd + upstreamOutputMicroUsd;
   return {
     inputTokens,
     outputTokens,
     totalTokens,
-    totalMicroUsd: inputMicroUsd + outputMicroUsd
+    upstreamMicroUsd,
+    totalMicroUsd,
+    grossProfitMicroUsd: Math.max(0, totalMicroUsd - upstreamMicroUsd)
   };
 }
 
@@ -712,7 +818,7 @@ function landingPage() {
   <main>
     <div class="box">
       <h1>Seenlife API is running</h1>
-      <p>This is the API backend for Seenlife model access, balances, API keys, and DeepSeek routing.</p>
+      <p>This is the API backend for Seenlife model access, balances, API keys, and unified model routing.</p>
       <p>Health check: <a href="/health">/health</a></p>
       <p>Admin panel: <a href="/admin">/admin</a></p>
       <p>OpenAI-compatible endpoint: <code>/v1/chat/completions</code></p>
