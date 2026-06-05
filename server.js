@@ -92,7 +92,7 @@ const MODELS = {
   }
 };
 
-const SHOPIFY_CREDIT_PRODUCT_RE = /seenlife\s+api\s+(balance|credits?)/i;
+const SHOPIFY_CREDIT_PRODUCT_RE = /(seenlife\s+api\s+(balance|credits?)|starter\s+api\s+credits?|pro\s+api\s+credits?|business\s+api\s+credits?|api\s+credits?)/i;
 const EMPTY_DB = { users: [], apiKeys: [], ledger: [], usageLogs: [] };
 
 const server = createServer(async (req, res) => {
@@ -176,7 +176,11 @@ async function handleChat(req, res) {
 
   const startedAt = Date.now();
   const upstream = await callModelGateway(model, body);
-  const cost = calculateUsageCost(model, upstream.usage || {});
+  const billableUsage = normalizeBillableUsage(upstream.usage);
+  if (!billableUsage) {
+    throw httpError("Provider did not return billable token usage. Request was not charged.", 502, "missing_usage");
+  }
+  const cost = calculateUsageCost(model, billableUsage);
 
   const result = await withDb(async (db) => {
     const apiKey = db.apiKeys.find((key) => key.keyHash === auth.apiKey.keyHash && !key.revokedAt);
@@ -393,6 +397,18 @@ async function handleAdmin(req, res, url) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/admin/resend-topup-email") {
+    const body = await readJson(req);
+    const emailResult = await buildManualTopupEmailResult(body);
+    await sendTopupEmail(emailResult);
+    return sendJson(res, 200, {
+      ok: true,
+      email: emailResult.user.email,
+      orderName: emailResult.orderName,
+      apiKeyIncluded: Boolean(emailResult.plainApiKey)
+    });
+  }
+
   if (req.method === "GET" && url.pathname === "/admin/users") {
     const db = await readDb();
     return sendJson(res, 200, { users: db.users.map(publicUser) });
@@ -514,6 +530,26 @@ function customerName(order) {
     ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim()
     : "";
   return direct || String(order.billing_address?.name || order.shipping_address?.name || "").trim();
+}
+
+async function buildManualTopupEmailResult(body) {
+  const amountMicroUsd = usdToMicro(body.amountUsd);
+  const orderName = String(body.orderName || body.orderId || "Manual resend").trim();
+  if (amountMicroUsd <= 0) throw httpError("amountUsd must be greater than 0", 400);
+
+  const db = await readDb();
+  const user = findUserByEmail(db, body.email);
+  if (!user) throw httpError("User not found. Create the user first.", 404);
+
+  return {
+    duplicate: false,
+    user: publicUser(user),
+    orderName,
+    plainApiKey: "",
+    hasExistingApiKey: db.apiKeys.some((key) => key.userId === user.id && !key.revokedAt),
+    topupAmountUsd: formatUsd(amountMicroUsd),
+    lineItems: []
+  };
 }
 
 async function sendTopupEmail(result) {
@@ -736,6 +772,28 @@ function findUserById(db, userId) {
   return db.users.find((user) => user.id === userId) || null;
 }
 
+function normalizeBillableUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+
+  const hasInputTokens = usage.prompt_tokens != null || usage.input_tokens != null;
+  const hasOutputTokens = usage.completion_tokens != null || usage.output_tokens != null;
+  if (!hasInputTokens || !hasOutputTokens) return null;
+
+  const inputTokens = Number(usage.prompt_tokens ?? usage.input_tokens);
+  const outputTokens = Number(usage.completion_tokens ?? usage.output_tokens);
+  const reportedTotalTokens = Number(usage.total_tokens ?? inputTokens + outputTokens);
+  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens) || !Number.isFinite(reportedTotalTokens)) return null;
+  if (inputTokens < 0 || outputTokens < 0 || reportedTotalTokens < 0) return null;
+  if (inputTokens + outputTokens <= 0) return null;
+
+  const totalTokens = Math.max(reportedTotalTokens, inputTokens + outputTokens);
+  return {
+    prompt_tokens: inputTokens,
+    completion_tokens: outputTokens,
+    total_tokens: totalTokens
+  };
+}
+
 function calculateUsageCost(model, usage) {
   const inputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0);
   const outputTokens = Number(usage.completion_tokens || usage.output_tokens || 0);
@@ -947,6 +1005,31 @@ function adminPage() {
           </div>
           <div id="newKey"></div>
         </div>
+
+        <div class="panel">
+          <h2>Resend Top-up Email</h2>
+          <div class="row">
+            <div>
+              <label for="emailResendEmail">Email</label>
+              <input id="emailResendEmail" placeholder="customer@example.com">
+            </div>
+            <div>
+              <label for="emailResendAmount">Amount USD</label>
+              <select id="emailResendAmount">
+                <option value="10">$10</option>
+                <option value="50">$50</option>
+                <option value="100">$100</option>
+              </select>
+            </div>
+            <div>
+              <label for="emailResendOrder">Order</label>
+              <input id="emailResendOrder" placeholder="#1448">
+            </div>
+          </div>
+          <div class="actions">
+            <button onclick="resendTopupEmail()">Send email</button>
+          </div>
+        </div>
       </section>
 
       <section class="stack">
@@ -1022,6 +1105,15 @@ function adminPage() {
         refreshAll();
       } catch (error) { setStatus(error.message, true); }
     }
+    async function resendTopupEmail(){
+      try {
+        const email = document.getElementById('emailResendEmail').value;
+        const amountUsd = Number(document.getElementById('emailResendAmount').value);
+        const orderName = document.getElementById('emailResendOrder').value;
+        await api('/admin/resend-topup-email', { method:'POST', body: JSON.stringify({ email, amountUsd, orderName }) });
+        setStatus('Top-up email sent.');
+      } catch (error) { setStatus(error.message, true); }
+    }
     async function refreshAll(){
       if (!token()) return;
       await Promise.allSettled([loadUsers(), loadUsage()]);
@@ -1037,7 +1129,7 @@ function adminPage() {
       document.getElementById('usage').innerHTML = logs.length ? '<table><thead><tr><th>Model</th><th>Tokens</th><th>Charged</th><th>Time</th></tr></thead><tbody>' + logs.slice(0,25).map(log => '<tr><td>' + escapeHtml(log.model) + '</td><td>' + Number(log.totalTokens || 0) + '</td><td>$' + (Number(log.chargedMicroUsd || 0) / 1000000).toFixed(6) + '</td><td>' + escapeHtml(log.createdAt || '') + '</td></tr>').join('') + '</tbody></table>' : '<p class="status">No usage yet.</p>';
     }
     function copyCommonEmails(email){
-      ['topupEmail','keyEmail'].forEach(id => { if (!document.getElementById(id).value) document.getElementById(id).value = email; });
+      ['topupEmail','keyEmail','emailResendEmail'].forEach(id => { if (!document.getElementById(id).value) document.getElementById(id).value = email; });
     }
     function escapeHtml(value){
       return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
