@@ -2,95 +2,13 @@ import { createServer } from "node:http";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { MODELS } from "./models.js";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const DB_PATH = resolve(process.env.SEENLIFE_DB_PATH || "./data/seenlife-db.json");
 const TOKENMIX_URL = process.env.TOKENMIX_BASE_URL || "https://api.tokenmix.ai/v1/chat/completions";
 const OPENROUTER_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1/chat/completions";
-
-const MODELS = {
-  "deepseek/deepseek-v4-flash": {
-    id: "deepseek/deepseek-v4-flash",
-    provider: "deepseek",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "deepseek/deepseek-v4-flash",
-    inputUsdPerMillion: 0.16,
-    outputUsdPerMillion: 0.32,
-    upstreamInputUsdPerMillion: 0.131387,
-    upstreamOutputUsdPerMillion: 0.262774
-  },
-  "deepseek/deepseek-v4-pro": {
-    id: "deepseek/deepseek-v4-pro",
-    provider: "deepseek",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "deepseek/deepseek-v4-pro",
-    inputUsdPerMillion: 1.89,
-    outputUsdPerMillion: 3.79,
-    upstreamInputUsdPerMillion: 1.576642,
-    upstreamOutputUsdPerMillion: 3.153285
-  },
-  "openai/gpt-4o": {
-    id: "openai/gpt-4o",
-    provider: "openai",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "openai/gpt-4o",
-    inputUsdPerMillion: 2.75,
-    outputUsdPerMillion: 10.99,
-    upstreamInputUsdPerMillion: 2.425,
-    upstreamOutputUsdPerMillion: 9.7
-  },
-  "openai/gpt-5-mini": {
-    id: "openai/gpt-5-mini",
-    provider: "openai",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "openai/gpt-5-mini",
-    inputUsdPerMillion: 0.29,
-    outputUsdPerMillion: 2.29,
-    upstreamInputUsdPerMillion: 0.2425,
-    upstreamOutputUsdPerMillion: 1.94
-  },
-  "anthropic/claude-sonnet-4.6": {
-    id: "anthropic/claude-sonnet-4.6",
-    provider: "anthropic",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "anthropic/claude-sonnet-4.6",
-    inputUsdPerMillion: 3.29,
-    outputUsdPerMillion: 16.49,
-    upstreamInputUsdPerMillion: 3,
-    upstreamOutputUsdPerMillion: 15
-  },
-  "google/gemini-3.1-flash-lite": {
-    id: "google/gemini-3.1-flash-lite",
-    provider: "google",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "google/gemini-3.1-flash-lite",
-    inputUsdPerMillion: 0.29,
-    outputUsdPerMillion: 1.75,
-    upstreamInputUsdPerMillion: 0.2425,
-    upstreamOutputUsdPerMillion: 1.455
-  },
-  "qwen/qwen3.6-max-preview": {
-    id: "qwen/qwen3.6-max-preview",
-    provider: "qwen",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "qwen/qwen3.6-max-preview",
-    inputUsdPerMillion: 1.39,
-    outputUsdPerMillion: 8.49,
-    upstreamInputUsdPerMillion: 1.182482,
-    upstreamOutputUsdPerMillion: 7.094891
-  },
-  "moonshot/kimi-k2.6": {
-    id: "moonshot/kimi-k2.6",
-    provider: "moonshot",
-    upstreamProvider: "tokenmix",
-    upstreamModel: "moonshot/kimi-k2.6",
-    inputUsdPerMillion: 0.99,
-    outputUsdPerMillion: 4.29,
-    upstreamInputUsdPerMillion: 0.854015,
-    upstreamOutputUsdPerMillion: 3.547445
-  }
-};
 
 const SHOPIFY_CREDIT_PRODUCT_RE = /(seenlife\s+api\s+(balance|credits?)|starter\s+api\s+credits?|pro\s+api\s+credits?|business\s+api\s+credits?|api\s+credits?)/i;
 const EMPTY_DB = { users: [], apiKeys: [], ledger: [], usageLogs: [] };
@@ -228,8 +146,10 @@ async function handleChat(req, res) {
     return { usageLog, balanceMicroUsd: user.balanceMicroUsd };
   });
 
+  const { seenlifeUpstreamProvider, ...customerResponse } = upstream;
+
   return sendJson(res, 200, {
-    ...upstream,
+    ...customerResponse,
     seenlife: {
       charged_usd: Number(formatUsd(cost.totalMicroUsd)),
       balance_usd: Number(formatUsd(result.balanceMicroUsd)),
@@ -431,11 +351,11 @@ async function callModelGateway(model, body) {
       modelName: model.upstreamModel,
       body
     });
-    data.seenlifeUpstreamProvider = "tokenmix";
+    data.seenlifeUpstreamProvider = "primary";
     return data;
   } catch (error) {
     if (!process.env.OPENROUTER_API_KEY) throw error;
-    console.warn(`TokenMix request failed for ${model.id}; trying OpenRouter fallback:`, error.message);
+    console.warn(`Primary model gateway failed for ${model.id}; trying fallback gateway:`, error.message);
     const data = await callOpenAiCompatibleGateway({
       url: OPENROUTER_URL,
       apiKey: process.env.OPENROUTER_API_KEY,
@@ -447,7 +367,7 @@ async function callModelGateway(model, body) {
         "x-title": "Seenlife API"
       }
     });
-    data.seenlifeUpstreamProvider = "openrouter";
+    data.seenlifeUpstreamProvider = "fallback";
     return data;
   }
 }
